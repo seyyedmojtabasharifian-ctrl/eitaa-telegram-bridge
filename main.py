@@ -23,7 +23,7 @@ CHAT_IDS = [
 ]
 
 STATE_FILE = Path("data/seen.json")
-STATE_VERSION = 2
+STATE_VERSION = 3
 MAX_MEDIA_SIZE = 45 * 1024 * 1024
 
 HEADERS = {
@@ -73,15 +73,7 @@ def save_state(state):
     temp.replace(STATE_FILE)
 
 
-def save_seen(state, message_id, fingerprint, sent_to):
-    state["messages"][message_id] = {
-        "fingerprint": fingerprint,
-        "sent_to": list(dict.fromkeys(sent_to)),
-    }
-    save_state(state)
-
-
-# ==================== EITAA PAGE ====================
+# ==================== FETCH EITAA ====================
 
 def get_page():
     if not EITAA_URL:
@@ -102,7 +94,7 @@ def get_page():
     return soup
 
 
-# ==================== MEDIA EXTRACTION ====================
+# ==================== EXTRACT MEDIA ====================
 
 def absolute_url(value):
     if not value:
@@ -127,28 +119,22 @@ def add_media(items, value, kind="auto"):
     if not url:
         return
 
-    if any(item["url"] == url for item in items):
-        return
-
-    items.append({"url": url, "kind": kind})
+    if not any(item["url"] == url for item in items):
+        items.append({"url": url, "kind": kind})
 
 
 def extract_media(container):
     items = []
 
-    # Images and lazy-loaded images
+    # Images
     for img in container.select("img"):
         for attr in (
-            "src",
-            "data-src",
-            "data-original",
-            "data-lazy-src",
-            "data-url",
+            "src", "data-src", "data-original",
+            "data-lazy-src", "data-url",
         ):
-            if img.get(attr):
-                add_media(items, img.get(attr), "photo")
+            add_media(items, img.get(attr), "photo")
 
-    # Images/videos embedded as CSS backgrounds
+    # Background images
     for element in container.select("[style]"):
         style = element.get("style", "")
 
@@ -158,8 +144,8 @@ def extract_media(container):
         ):
             add_media(items, value, "auto")
 
-    # Videos and their sources
-    for element in container.select("video, video source"):
+    # Video and video sources
+    for element in container.select("video, video source, source"):
         add_media(
             items,
             element.get("src") or element.get("data-src"),
@@ -169,7 +155,7 @@ def extract_media(container):
         if element.name == "video":
             add_media(items, element.get("poster"), "photo")
 
-    # Links to direct files or media-related elements
+    # Direct file links
     extensions = (
         ".jpg", ".jpeg", ".png", ".webp", ".gif",
         ".mp4", ".mov", ".webm", ".m4v",
@@ -191,18 +177,17 @@ def extract_media(container):
         )):
             add_media(items, href, "auto")
 
-    # Additional media attributes used by some page templates
+    # Lazy-loaded media attributes
     for element in container.select(
         "[data-src], [data-original], [data-url]"
     ):
         for attr in ("data-src", "data-original", "data-url"):
-            if element.get(attr):
-                add_media(items, element.get(attr), "auto")
+            add_media(items, element.get(attr), "auto")
 
     return items
 
 
-# ==================== MESSAGE EXTRACTION ====================
+# ==================== EXTRACT MESSAGES ====================
 
 def extract_messages(soup):
     containers = soup.select(
@@ -227,8 +212,7 @@ def extract_messages(soup):
 
         text = (
             text_element.get_text("\n", strip=True)
-            if text_element
-            else ""
+            if text_element else ""
         )
 
         media = extract_media(container)
@@ -257,14 +241,14 @@ def extract_messages(soup):
             "fingerprint": fingerprint,
         })
 
-    # The public page commonly lists newest posts first.
+    # Send in oldest-to-newest order when the page lists newest first.
     messages.reverse()
 
     logging.info("Parsed %d Eitaa messages", len(messages))
 
     for message in messages:
         logging.info(
-            "Found message id=%s, text_chars=%d, media_count=%d",
+            "Message id=%s text_chars=%d media_count=%d",
             message["id"],
             len(message["text"]),
             len(message["media"]),
@@ -276,11 +260,9 @@ def extract_messages(soup):
 # ==================== DOWNLOAD MEDIA ====================
 
 def download_media(item):
-    url = item["url"]
-
     try:
         with session.get(
-            url,
+            item["url"],
             timeout=40,
             stream=True,
         ) as response:
@@ -300,7 +282,10 @@ def download_media(item):
                 total += len(chunk)
 
                 if total > MAX_MEDIA_SIZE:
-                    logging.warning("Media exceeds size limit: %s", url)
+                    logging.warning(
+                        "Media exceeds size limit: %s",
+                        item["url"],
+                    )
                     return None
 
                 chunks.append(chunk)
@@ -308,14 +293,15 @@ def download_media(item):
             content = b"".join(chunks)
 
             if not content:
-                logging.warning("Empty media response: %s", url)
                 return None
 
             path = urlparse(response.url).path
             filename = unquote(path.rsplit("/", 1)[-1]) or "media"
 
         if "." not in filename:
-            extension = mimetypes.guess_extension(content_type)
+            extension = mimetypes.guess_extension(
+                content_type or "application/octet-stream"
+            )
             if extension:
                 filename += extension
 
@@ -339,16 +325,13 @@ def download_media(item):
         }
 
     except requests.RequestException as exc:
-        logging.warning("Could not download media: %s", exc)
+        logging.warning("Media download failed: %s", exc)
         return None
 
 
 # ==================== TELEGRAM API ====================
 
 def telegram_request(method, data=None, files=None):
-    if not BOT_TOKEN:
-        raise RuntimeError("Secret TELEGRAM_BOT_TOKEN is missing.")
-
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
 
     response = requests.post(
@@ -371,13 +354,9 @@ def telegram_request(method, data=None, files=None):
 
 
 def send_text(chat_id, text):
-    # Telegram text limit is 4096 characters.
-    parts = [
-        text[i:i + 4000]
-        for i in range(0, len(text), 4000)
-    ]
+    for start in range(0, len(text), 4000):
+        part = text[start:start + 4000]
 
-    for part in parts:
         telegram_request(
             "sendMessage",
             data={
@@ -435,32 +414,34 @@ def deliver_message(chat_id, message):
             downloaded.append(media)
         else:
             logging.warning(
-                "Media unavailable for message %s",
+                "Could not download media for message %s",
                 message["id"],
             )
 
-    # If the media is inaccessible, at least preserve the text.
+    # Do not lose the text if media is inaccessible.
     if not downloaded:
         if text:
             send_text(chat_id, text)
             logging.warning(
-                "Sent text only; media could not be downloaded "
-                "for message %s",
+                "Text sent without media for message %s",
                 message["id"],
             )
             return
 
         raise RuntimeError(
-            f"Could not download any media for message {message['id']}"
+            f"No downloadable media for message {message['id']}"
         )
 
-    caption = text[:1000] if text else ""
-    send_media(chat_id, downloaded[0], caption)
+    send_media(
+        chat_id,
+        downloaded[0],
+        text[:1000] if text else "",
+    )
 
     if len(text) > 1000:
         send_text(chat_id, text[1000:])
 
-    # Send remaining attachments individually.
+    # Send additional photos/files individually.
     for media in downloaded[1:]:
         send_media(chat_id, media)
 
@@ -490,74 +471,71 @@ def main():
 
     state["messages"] = stored
 
-    # FIRST RUN: save the current posts as baseline.
-    # They will NOT be forwarded.
+    # First run: initialize state, but DO NOT skip current posts.
     if not state.get("initialized"):
-        for message in messages:
-            stored[message["id"]] = {
-                "fingerprint": message["fingerprint"],
-                "sent_to": CHAT_IDS.copy(),
-            }
-
         state["initialized"] = True
-        state["version"] = STATE_VERSION
-        save_state(state)
-
-        logging.info(
-            "Baseline saved: %d existing posts will not be sent. "
-            "Only posts first appearing in a later run are forwarded.",
-            len(messages),
-        )
-        return
-
-    # Migrate the previous version's state without resending old posts.
-    if state.get("version") != STATE_VERSION:
-        for message_id, entry in list(stored.items()):
-            if not isinstance(entry, dict):
-                entry = {}
-
-            entry["sent_to"] = CHAT_IDS.copy()
-            stored[message_id] = entry
-
         state["version"] = STATE_VERSION
         state["messages"] = stored
         save_state(state)
 
         logging.info(
-            "Migrated old state. Previously known posts will not be sent."
+            "First run: current visible posts will now be forwarded."
+        )
+
+    # Migrate old state. Previous versions may have incorrectly marked
+    # existing posts as already sent, so retry them at both destinations.
+    elif state.get("version") != STATE_VERSION:
+        for message_id, entry in list(stored.items()):
+            if not isinstance(entry, dict):
+                entry = {}
+
+            entry["sent_to"] = []
+            stored[message_id] = entry
+
+        state["version"] = STATE_VERSION
+        save_state(state)
+
+        logging.info(
+            "State upgraded: previously recorded posts will be retried."
         )
 
     errors = 0
-    new_count = 0
+    new_ids = 0
 
     for message in messages:
         message_id = message["id"]
         fingerprint = message["fingerprint"]
 
-        # Existing message IDs are never forwarded again, even if edited.
-        if message_id in stored:
+        is_new_id = message_id not in stored
+
+        if is_new_id:
+            new_ids += 1
+            entry = {
+                "fingerprint": fingerprint,
+                "sent_to": [],
+            }
+            stored[message_id] = entry
+            save_state(state)
+        else:
             entry = stored[message_id]
 
             if not isinstance(entry, dict):
-                entry = {}
+                entry = {
+                    "fingerprint": fingerprint,
+                    "sent_to": [],
+                }
 
-            if entry.get("fingerprint") != fingerprint:
-                entry["fingerprint"] = fingerprint
-                entry["sent_to"] = CHAT_IDS.copy()
-                stored[message_id] = entry
-                save_state(state)
+            # Do not resend an edited post that has already been delivered.
+            entry.setdefault("sent_to", [])
 
-            continue
+            if not isinstance(entry["sent_to"], list):
+                entry["sent_to"] = []
 
-        # An unseen ID means a post not present in our stored history.
-        new_count += 1
-        entry = {
-            "fingerprint": fingerprint,
-            "sent_to": [],
-        }
-        stored[message_id] = entry
-        save_state(state)
+            entry["fingerprint"] = fingerprint
+            stored[message_id] = entry
+            save_state(state)
 
+        # Send only to destinations that have not succeeded yet.
         for chat_id in CHAT_IDS:
             if chat_id in entry["sent_to"]:
                 continue
@@ -570,7 +548,7 @@ def main():
                 save_state(state)
 
                 logging.info(
-                    "Forwarded new message %s to destination %s",
+                    "Forwarded Eitaa message %s to %s",
                     message_id,
                     chat_id,
                 )
@@ -578,22 +556,25 @@ def main():
             except Exception as exc:
                 errors += 1
                 logging.exception(
-                    "Failed message %s to destination %s: %s",
+                    "Failed forwarding message %s to %s: %s",
                     message_id,
                     chat_id,
                     exc,
                 )
 
+    state["initialized"] = True
+    state["version"] = STATE_VERSION
+    state["messages"] = stored
     save_state(state)
 
-    logging.info("New message IDs found: %d", new_count)
+    logging.info("New message IDs found: %d", new_ids)
 
     if errors:
         raise RuntimeError(
-            f"{errors} delivery operation(s) failed. See logs above."
+            f"{errors} delivery operation(s) failed. Check logs."
         )
 
-    logging.info("Run completed successfully.")
+    logging.info("Forwarding run completed successfully.")
 
 
 if __name__ == "__main__":
