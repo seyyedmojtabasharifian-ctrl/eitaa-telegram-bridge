@@ -433,6 +433,27 @@ def main():
         stored = {}
     state["messages"] = stored
 
+    # Optional one-time recovery: re-attempt visible posts that were marked sent
+    # by an earlier run, even if they never actually appeared in Telegram.
+    # Set GitHub Secret/Variable RESET_SENT_HISTORY_ONCE=true for one run.
+    # The state marker prevents repeated resends on subsequent workflow runs.
+    reset_requested = os.environ.get("RESET_SENT_HISTORY_ONCE", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if reset_requested and not state.get("sent_history_reset_done"):
+        reset_count = 0
+        for saved_entry in stored.values():
+            if isinstance(saved_entry, dict):
+                saved_entry["sent_to"] = []
+                reset_count += 1
+        state["sent_history_reset_done"] = True
+        state["messages"] = stored
+        save_state(state)
+        logging.warning(
+            "One-time recovery reset cleared sent_to for %d stored messages.",
+            reset_count,
+        )
+
     if not state.get("initialized"):
         state["initialized"] = True
         state["version"] = STATE_VERSION
