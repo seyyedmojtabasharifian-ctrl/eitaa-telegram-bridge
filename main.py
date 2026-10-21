@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -17,11 +16,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("eitaa-bridge")
 
-SOURCE_URL = os.environ["EITAA_URL"].strip()
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+SOURCE_URL = os.environ.get("EITAA_URL", "").strip()
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_IDS = [
     x.strip()
-    for x in os.environ["TELEGRAM_CHAT_IDS"].split(",")
+    for x in os.environ.get("TELEGRAM_CHAT_IDS", "").split(",")
     if x.strip()
 ]
 
@@ -33,79 +32,131 @@ SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": (
         "Mozilla/5.0 (Linux; Android 13) "
-        "AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"
-    )
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Mobile Safari/537.36"
+    ),
+    "Accept-Language": "fa,en-US;q=0.9,en;q=0.8",
 })
 
 
 def clean_text(value):
-    return re.sub(
-        r"\n{3,}", "\n\n",
-        (value or "").replace("\xa0", " ")
-    ).strip()
+    value = (value or "").replace("\xa0", " ")
+    return re.sub(r"\n{3,}", "\n\n", value).strip()
 
 
 def get_page():
+    if not SOURCE_URL:
+        raise RuntimeError("Secret EITAA_URL is missing")
+
     response = SESSION.get(SOURCE_URL, timeout=TIMEOUT)
+
+    log.info("Eitaa HTTP status: %s", response.status_code)
+    log.info("Eitaa final URL: %s", response.url)
+    log.info(
+        "Eitaa content type: %s",
+        response.headers.get("Content-Type", "")
+    )
+
     response.raise_for_status()
     response.encoding = response.apparent_encoding or "utf-8"
-    return response.text
+    html = response.text
+
+    soup = BeautifulSoup(html, "html.parser")
+    title = (
+        clean_text(soup.title.get_text(" ", strip=True))
+        if soup.title else "(no title)"
+    )
+
+    log.info("Eitaa HTML length: %d characters", len(html))
+    log.info("Eitaa page title: %s", title)
+    log.info(
+        "HTML contains message-like words: %s",
+        any(word in html.lower() for word in [
+            "post", "message", "channel", "پیام", "مطالب"
+        ])
+    )
+    # Diagnostic only; do not print the entire page or any secrets.
+    log.info("HTML preview: %s", clean_text(html[:700]))
+
+    return html
+
+
+def absolute_url(value):
+    if not value:
+        return ""
+
+    url = urljoin(SOURCE_URL, value.strip())
+
+    if urlparse(url).scheme not in ("http", "https"):
+        return ""
+
+    return url
 
 
 def extract_media(node):
     media = []
-    seen_urls = set()
+    seen = set()
 
     for tag in node.find_all(["img", "video", "source"]):
-        src = (
-            tag.get("src")
-            or tag.get("data-src")
-            or tag.get("data-original")
-            or tag.get("data-lazy-src")
+        attrs = [
+            "src", "data-src", "data-original",
+            "data-lazy-src", "data-url"
+        ]
+        src = next(
+            (tag.get(key) for key in attrs if tag.get(key)),
+            None
         )
 
-        if not src and tag.name == "video":
-            continue
-
         if src:
-            url = urljoin(SOURCE_URL, src)
-            if urlparse(url).scheme in ("http", "https"):
+            url = absolute_url(src)
+            if url and url not in seen:
                 kind = "photo" if tag.name == "img" else "video"
-                if url not in seen_urls:
-                    media.append((url, kind))
-                    seen_urls.add(url)
+                media.append((url, kind))
+                seen.add(url)
 
         if tag.name == "video" and tag.get("poster"):
-            url = urljoin(SOURCE_URL, tag["poster"])
-            if url not in seen_urls:
+            url = absolute_url(tag["poster"])
+            if url and url not in seen:
                 media.append((url, "photo"))
-                seen_urls.add(url)
+                seen.add(url)
 
-    for a in node.find_all("a", href=True):
-        url = urljoin(SOURCE_URL, a["href"])
+    extensions = {
+        ".jpg": "photo",
+        ".jpeg": "photo",
+        ".png": "photo",
+        ".webp": "photo",
+        ".gif": "photo",
+        ".mp4": "video",
+        ".mov": "video",
+        ".m4v": "video",
+        ".pdf": "document",
+        ".zip": "document",
+        ".rar": "document",
+        ".doc": "document",
+        ".docx": "document",
+        ".xls": "document",
+        ".xlsx": "document",
+        ".ppt": "document",
+        ".pptx": "document",
+        ".mp3": "document",
+        ".ogg": "document",
+    }
+
+    for link in node.find_all("a", href=True):
+        url = absolute_url(link["href"])
+        if not url or url in seen:
+            continue
+
         path = urlparse(url).path.lower()
-
-        extensions = {
-            ".jpg": "photo", ".jpeg": "photo",
-            ".png": "photo", ".webp": "photo",
-            ".gif": "photo", ".mp4": "video",
-            ".mov": "video", ".pdf": "document",
-            ".zip": "document", ".rar": "document",
-            ".doc": "document", ".docx": "document",
-            ".xls": "document", ".xlsx": "document",
-            ".ppt": "document", ".pptx": "document",
-            ".mp3": "document", ".ogg": "document",
-        }
-
         kind = next(
-            (v for ext, v in extensions.items()
+            (value for ext, value in extensions.items()
              if path.endswith(ext)),
             None
         )
 
-        if kind and url not in seen_urls:
+        if kind:
             media.append((url, kind))
-            seen_urls.add(url)
+            seen.add(url)
 
     return media[:10]
 
@@ -118,20 +169,25 @@ def extract_messages(html):
     selectors = [
         "[data-post-id]",
         "[data-message-id]",
+        "[data-id]",
         ".channel-post",
         ".post-item",
         ".post",
+        ".message",
+        ".feed-item",
         "article",
     ]
 
     for selector in selectors:
         for node in soup.select(selector):
             if id(node) not in seen_nodes:
-                seen_nodes.add(id(node))
                 nodes.append(node)
+                seen_nodes.add(id(node))
+
+    log.info("HTML parse: found %d candidate containers", len(nodes))
 
     messages = []
-    fingerprints = set()
+    seen_fingerprints = set()
 
     for node in nodes:
         text = clean_text(node.get_text("\n", strip=True))
@@ -139,54 +195,48 @@ def extract_messages(html):
 
         if not text and not media:
             continue
+
         if len(text) > 15000:
             continue
 
         post_id = (
             node.get("data-post-id")
             or node.get("data-message-id")
+            or node.get("data-id")
+            or node.get("id")
             or ""
         )
 
         if not post_id:
-            for a in node.find_all("a", href=True):
-                match = re.search(
-                    r"/([^/?#]+)/(\d+)(?:[/?#]|$)",
-                    urlparse(a["href"]).path
-                )
+            for link in node.find_all("a", href=True):
+                path = urlparse(link["href"]).path
+                match = re.search(r"/([^/]+)/(\d+)/?$", path)
                 if match:
                     post_id = match.group(2)
                     break
 
-        # Fallback identity when Eitaa exposes no post ID.
-        identity = (
-            str(post_id) if post_id else
-            hashlib.sha256(
-                (text + "\n" + "\n".join(u for u, _ in media))
-                .encode("utf-8")
-            ).hexdigest()
-        )
-
+        media_urls = "\n".join(url for url, _ in media)
         fingerprint = hashlib.sha256(
-            (identity + "\n" + text + "\n" +
-             "\n".join(u for u, _ in media)).encode("utf-8")
+            (str(post_id) + "\n" + text + "\n" + media_urls)
+            .encode("utf-8")
         ).hexdigest()
 
-        if fingerprint in fingerprints:
+        if fingerprint in seen_fingerprints:
             continue
-        fingerprints.add(fingerprint)
+
+        seen_fingerprints.add(fingerprint)
 
         messages.append({
-            "id": identity,
+            "id": str(post_id or fingerprint),
             "fingerprint": fingerprint,
             "text": text,
             "media": media,
         })
 
-    # Public pages commonly list newest items first.
-    # Send older unseen items before newer ones.
+    # Assumes the public page lists newest posts first.
     messages = messages[:MAX_MESSAGES]
     messages.reverse()
+
     return messages
 
 
@@ -198,37 +248,54 @@ def load_state():
         data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         return set(data.get("seen", []))
     except (OSError, ValueError):
-        log.exception("State file could not be read")
+        log.exception("Could not read message state")
         return set()
 
 
 def save_state(seen):
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     temp = STATE_PATH.with_suffix(".tmp")
     temp.write_text(
-        json.dumps({"seen": list(seen)[-5000:]},
-                   ensure_ascii=False, indent=2),
+        json.dumps(
+            {"seen": sorted(seen)[-5000:]},
+            ensure_ascii=False,
+            indent=2
+        ),
         encoding="utf-8"
     )
     temp.replace(STATE_PATH)
 
 
 def telegram(method, data=None, files=None):
+    if not BOT_TOKEN:
+        raise RuntimeError("Secret TELEGRAM_BOT_TOKEN is missing")
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+
     response = SESSION.post(
-        url, data=data or {}, files=files, timeout=60
+        url,
+        data=data or {},
+        files=files,
+        timeout=60
     )
     response.raise_for_status()
-    result = response.json()
 
-    if not result.get("ok"):
-        raise RuntimeError(str(result))
+    payload = response.json()
 
-    return result["result"]
+    if not payload.get("ok"):
+        # Avoid printing the bot token or request URL in logs.
+        raise RuntimeError(
+            f"Telegram API error in {method}: "
+            f"{payload.get('description', 'unknown error')}"
+        )
+
+    return payload.get("result")
 
 
 def send_text(chat_id, text):
     text = text or "(پیام بدون متن)"
+
     for start in range(0, len(text), 3900):
         telegram("sendMessage", {
             "chat_id": chat_id,
@@ -250,7 +317,7 @@ def send_media(chat_id, url, kind, caption=""):
         "document": "document",
     }.get(kind, "document")
 
-    # First let Telegram fetch the media URL itself.
+    # First try letting Telegram download the public media URL.
     try:
         telegram(method, {
             "chat_id": chat_id,
@@ -259,12 +326,16 @@ def send_media(chat_id, url, kind, caption=""):
         })
         return True
     except Exception as exc:
-        log.warning("Direct media transfer failed: %s", exc)
+        log.warning(
+            "Direct media transfer failed (%s); trying download",
+            type(exc).__name__
+        )
 
-    # If the source requires a Referer, download and upload the file.
+    # If the source requires a Referer, download it ourselves.
     try:
         response = SESSION.get(
-            url, timeout=TIMEOUT, stream=True,
+            url,
+            timeout=TIMEOUT,
             headers={"Referer": SOURCE_URL}
         )
         response.raise_for_status()
@@ -274,9 +345,11 @@ def send_media(chat_id, url, kind, caption=""):
         ).lower()
 
         if "text/html" in content_type:
+            log.warning("Media URL returned HTML, not a file")
             return False
 
         blob = response.content
+
         if not blob:
             return False
 
@@ -289,8 +362,8 @@ def send_media(chat_id, url, kind, caption=""):
         )
         return True
 
-    except Exception:
-        log.exception("Media transfer failed")
+    except Exception as exc:
+        log.warning("Media download/upload failed: %s", type(exc).__name__)
         return False
 
 
@@ -302,46 +375,55 @@ def deliver(chat_id, message):
         send_text(chat_id, text)
         return
 
-    first_caption = text
-    sent_any = False
+    caption_pending = text
+    any_sent = False
 
     for url, kind in media:
         success = send_media(
-            chat_id, url, kind, first_caption
+            chat_id, url, kind, caption_pending
         )
-        if success:
-            sent_any = True
-            first_caption = ""
 
-    if not sent_any:
+        if success:
+            any_sent = True
+            caption_pending = ""
+
+    if not any_sent:
         send_text(
             chat_id,
-            (text + "\n\n" if text else "") +
-            "انتقال رسانه ناموفق بود."
+            (text + "\n\n" if text else "")
+            + "(انتقال رسانه ناموفق بود)"
         )
-    elif first_caption and text:
-        # Keep text if the first media failed but a later one worked.
-        send_text(chat_id, text)
+    elif caption_pending:
+        send_text(chat_id, caption_pending)
 
 
 def main():
-    if not BOT_TOKEN or not CHAT_IDS:
-        raise SystemExit("Telegram secrets are missing.")
+    if not BOT_TOKEN:
+        raise SystemExit("Secret TELEGRAM_BOT_TOKEN is missing")
 
-    messages = extract_messages(get_page())
+    if not CHAT_IDS:
+        raise SystemExit("Secret TELEGRAM_CHAT_IDS is missing")
+
+    html = get_page()
+    messages = extract_messages(html)
+
     log.info("Parsed %d candidate messages", len(messages))
 
     if not messages:
         raise SystemExit(
-            "No messages detected. Check the Eitaa page HTML/selectors."
+            "No messages detected. Check the diagnostic logs above. "
+            "The Eitaa HTML structure may have changed or require JavaScript."
         )
 
     seen = load_state()
 
-    # First run establishes a baseline; it doesn't forward old posts.
+    # First run establishes a baseline to avoid flooding old posts.
     if seen is None:
         save_state({m["fingerprint"] for m in messages})
-        log.info("Initial baseline saved; no old messages sent.")
+        log.info(
+            "Initial baseline saved with %d items; nothing sent.",
+            len(messages)
+        )
         return
 
     for message in messages:
@@ -351,18 +433,26 @@ def main():
             continue
 
         log.info("New item detected: %s", message["id"])
+        delivery_ok = True
 
-        # Mark only after attempting all destinations.
         for chat_id in CHAT_IDS:
             try:
                 deliver(chat_id, message)
+                log.info("Delivery completed for a destination")
             except Exception:
-                log.exception("Delivery failed for destination %s", chat_id)
+                delivery_ok = False
+                log.exception("Delivery failed for a destination")
 
-        seen.add(key)
-        save_state(seen)
+        # Don't mark as delivered if a destination failed.
+        # This allows a later run to retry, though a destination that
+        # already received it may receive it again.
+        if delivery_ok:
+            seen.add(key)
+            save_state(seen)
+
         time.sleep(1)
 
 
 if __name__ == "__main__":
     main()
+
