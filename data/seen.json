@@ -1,15 +1,37 @@
 {
-  "seen": [
-    "657",
-    "658",
-    "656",
-    "44872508c64149873efbee41e58bd4fc52331d5e7dffd68cc6b201e314b08103",
-    "664",
-    "659",
-    "eee7512c8e7589bc488b6fe11680b2ece0b46d1d52c360c4414212263b231f69",
-    "0dc74282729414b80de603f77a663e1d47640563b17380d38b70700b754aff48",
-    "665",
-    "655",
-    "666"
-  ]
+  "initialized": true,
+  "messages": {
+    "666": {
+      "fingerprint": "c8a0ea5b4e32f67b2337656851fcdb06a27d25471dc0fc8010abbf53cea5962f",
+      "sent_to": []
+    },
+    "665": {
+      "fingerprint": "2454c021f456bb8255dbdc435c1bd0236caa7ba93a6542768c1d71ef3b186f3e",
+      "sent_to": []
+    },
+    "664": {
+      "fingerprint": "45f298d41dcdaa561ded1a15aecb6e15e11dd87cc8f7474e4e9c556821ea2869",
+      "sent_to": []
+    },
+    "659": {
+      "fingerprint": "f3669871eff3154152638fb9bbb0a636f278991b75d750aa0a5e6ff9522b022e",
+      "sent_to": []
+    },
+    "658": {
+      "fingerprint": "4119069e42b155b8ef7cdd1f663e2cfcd61f14018e45d517dd0488de1d08a3a2",
+      "sent_to": []
+    },
+    "657": {
+      "fingerprint": "f4d198a814d8b3ec20a098f2ffdb660c4a16c4addd85f69ac62e756ac5371bd3",
+      "sent_to": []
+    },
+    "656": {
+      "fingerprint": "d3ce8a65458edd33f66235598e1f25bd80e279ef55fc28b5e8dd0ce73cb04a10",
+      "sent_to": []
+    },
+    "655": {
+      "fingerprint": "23c9ba909956e2fffaf0ac9b335a59ca04ddcac6db60ea74e89e9838caf72255",
+      "sent_to": []
+    }
+  }
 }
