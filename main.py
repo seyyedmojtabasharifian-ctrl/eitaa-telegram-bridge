@@ -2,7 +2,6 @@
 import os
 import re
 import json
-import time
 import hashlib
 import logging
 import mimetypes
@@ -12,18 +11,19 @@ from urllib.parse import urljoin, urlparse, unquote
 import requests
 from bs4 import BeautifulSoup
 
-# -------------------- تنظیمات --------------------
+# ==================== CONFIG ====================
 
 EITAA_URL = os.environ.get("EITAA_URL", "").strip()
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 CHAT_IDS = [
-    x.strip()
-    for x in os.environ.get("TELEGRAM_CHAT_IDS", "").split(",")
-    if x.strip()
+    item.strip()
+    for item in os.environ.get("TELEGRAM_CHAT_IDS", "").split(",")
+    if item.strip()
 ]
 
 STATE_FILE = Path("data/seen.json")
+STATE_VERSION = 2
 MAX_MEDIA_SIZE = 45 * 1024 * 1024
 
 HEADERS = {
@@ -36,32 +36,14 @@ HEADERS = {
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
+    format="%(asctime)s %(levelname)s %(message)s",
 )
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
 
-# -------------------- دریافت صفحه --------------------
-
-def get_page():
-    if not EITAA_URL:
-        raise RuntimeError("Secret EITAA_URL تنظیم نشده است.")
-
-    response = session.get(EITAA_URL, timeout=30)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    logging.info("Eitaa HTTP status: %s", response.status_code)
-    logging.info("HTML length: %s", len(response.text))
-    logging.info("Page title: %s", soup.title.get_text(" ", strip=True)
-                 if soup.title else "بدون عنوان")
-
-    return soup
-
-
-# -------------------- مدیریت وضعیت --------------------
+# ==================== STATE ====================
 
 def load_state():
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -73,26 +55,61 @@ def load_state():
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
 
-    return {}
+    return {
+        "version": STATE_VERSION,
+        "initialized": False,
+        "messages": {},
+    }
 
 
 def save_state(state):
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_file = STATE_FILE.with_suffix(".tmp")
-    temp_file.write_text(
+    temp = STATE_FILE.with_suffix(".tmp")
+
+    temp.write_text(
         json.dumps(state, ensure_ascii=False, indent=2),
-        encoding="utf-8"
+        encoding="utf-8",
     )
-    temp_file.replace(STATE_FILE)
+    temp.replace(STATE_FILE)
 
 
-# -------------------- استخراج رسانه --------------------
+def save_seen(state, message_id, fingerprint, sent_to):
+    state["messages"][message_id] = {
+        "fingerprint": fingerprint,
+        "sent_to": list(dict.fromkeys(sent_to)),
+    }
+    save_state(state)
+
+
+# ==================== EITAA PAGE ====================
+
+def get_page():
+    if not EITAA_URL:
+        raise RuntimeError("Secret EITAA_URL is missing.")
+
+    response = session.get(EITAA_URL, timeout=30)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    logging.info("Eitaa HTTP status: %s", response.status_code)
+    logging.info("HTML length: %s", len(response.text))
+    logging.info(
+        "Page title: %s",
+        soup.title.get_text(" ", strip=True) if soup.title else "unknown",
+    )
+
+    return soup
+
+
+# ==================== MEDIA EXTRACTION ====================
 
 def absolute_url(value):
     if not value:
         return None
 
     value = value.strip()
+
     if value.startswith(("data:", "javascript:", "#")):
         return None
 
@@ -104,12 +121,12 @@ def absolute_url(value):
     return url
 
 
-def add_media(items, url, kind="auto"):
-    url = absolute_url(url)
+def add_media(items, value, kind="auto"):
+    url = absolute_url(value)
+
     if not url:
         return
 
-    # حذف موارد تکراری
     if any(item["url"] == url for item in items):
         return
 
@@ -119,116 +136,118 @@ def add_media(items, url, kind="auto"):
 def extract_media(container):
     items = []
 
-    # عکس‌های داخل پیام
-    photo_selectors = [
-        ".etme_widget_message_photo_wrap",
-        ".etme_widget_message_photo",
-        ".js-message_photo",
-        "a[class*='photo_wrap']",
-        "a[class*='message_photo']",
-    ]
+    # Images and lazy-loaded images
+    for img in container.select("img"):
+        for attr in (
+            "src",
+            "data-src",
+            "data-original",
+            "data-lazy-src",
+            "data-url",
+        ):
+            if img.get(attr):
+                add_media(items, img.get(attr), "photo")
 
-    for selector in photo_selectors:
-        for element in container.select(selector):
-            style = element.get("style", "")
-            for match in re.findall(
-                r"""url\(['"]?(.*?)['"]?\)""", style
-            ):
-                add_media(items, match, "photo")
+    # Images/videos embedded as CSS backgrounds
+    for element in container.select("[style]"):
+        style = element.get("style", "")
 
-            for img in element.select("img"):
-                for attr in ("src", "data-src", "data-original"):
-                    add_media(items, img.get(attr), "photo")
+        for value in re.findall(
+            r"""url\(\s*['"]?(.*?)['"]?\s*\)""",
+            style,
+        ):
+            add_media(items, value, "auto")
 
-            if element.name == "a":
-                add_media(items, element.get("href"), "photo")
-
-    # ویدیو و منبع ویدیو
-    for element in container.select("video, video source, source"):
+    # Videos and their sources
+    for element in container.select("video, video source"):
         add_media(
             items,
             element.get("src") or element.get("data-src"),
-            "video"
+            "video",
         )
+
         if element.name == "video":
             add_media(items, element.get("poster"), "photo")
 
-    # فایل‌ها و لینک‌های مستقیم رسانه
+    # Links to direct files or media-related elements
     extensions = (
         ".jpg", ".jpeg", ".png", ".webp", ".gif",
         ".mp4", ".mov", ".webm", ".m4v",
         ".pdf", ".zip", ".rar", ".7z",
         ".doc", ".docx", ".xls", ".xlsx",
         ".ppt", ".pptx", ".txt", ".apk",
-        ".mp3", ".m4a", ".ogg", ".wav"
+        ".mp3", ".m4a", ".ogg", ".wav",
     )
 
     for link in container.select("a[href]"):
         href = link.get("href", "")
         path = urlparse(href).path.lower()
+        classes = " ".join(link.get("class", [])).lower()
 
         if any(path.endswith(ext) for ext in extensions):
             add_media(items, href, "auto")
+        elif any(word in classes for word in (
+            "document", "file", "video", "audio", "photo",
+        )):
+            add_media(items, href, "auto")
 
-    # تصاویر دارای آدرس در data attributes
+    # Additional media attributes used by some page templates
     for element in container.select(
         "[data-src], [data-original], [data-url]"
     ):
         for attr in ("data-src", "data-original", "data-url"):
-            value = element.get(attr)
-            if value:
-                add_media(items, value, "auto")
+            if element.get(attr):
+                add_media(items, element.get(attr), "auto")
 
     return items
 
 
-# -------------------- استخراج پیام‌های ایتا --------------------
+# ==================== MESSAGE EXTRACTION ====================
 
 def extract_messages(soup):
-    messages = []
-
-    # کلاس واقعی پیام‌ها از گزارش HTML ایتا شناسایی شده است.
     containers = soup.select(
         "div.etme_widget_message_wrap, "
         "div.js-widget_message_wrap"
     )
 
-    # جلوگیری از انتخاب تکراری یک عنصر
-    unique = {}
+    messages = []
+    used_ids = set()
+
     for container in containers:
         message_id = str(container.get("id", "")).strip()
 
-        if message_id and message_id not in unique:
-            unique[message_id] = container
+        if not message_id or message_id in used_ids:
+            continue
 
-    for message_id, container in unique.items():
+        used_ids.add(message_id)
+
         text_element = container.select_one(
             ".js-message_text, .etme_widget_message_text"
         )
 
         text = (
             text_element.get_text("\n", strip=True)
-            if text_element else ""
+            if text_element
+            else ""
         )
 
         media = extract_media(container)
 
-        # پیام‌های بدون متن و بدون رسانه نادیده گرفته می‌شوند.
         if not text and not media:
             continue
 
-        fingerprint_source = json.dumps(
+        raw = json.dumps(
             {
                 "id": message_id,
                 "text": text,
-                "media": [m["url"] for m in media],
+                "media": [item["url"] for item in media],
             },
             ensure_ascii=False,
             sort_keys=True,
         )
 
         fingerprint = hashlib.sha256(
-            fingerprint_source.encode("utf-8")
+            raw.encode("utf-8")
         ).hexdigest()
 
         messages.append({
@@ -238,15 +257,14 @@ def extract_messages(soup):
             "fingerprint": fingerprint,
         })
 
-    # ترتیب نمایش صفحه معمولاً از جدید به قدیم است.
-    # ارسال را از قدیمی به جدید انجام می‌دهیم.
+    # The public page commonly lists newest posts first.
     messages.reverse()
 
     logging.info("Parsed %d Eitaa messages", len(messages))
 
     for message in messages:
         logging.info(
-            "Message id=%s text_chars=%d media_count=%d",
+            "Found message id=%s, text_chars=%d, media_count=%d",
             message["id"],
             len(message["text"]),
             len(message["media"]),
@@ -255,51 +273,49 @@ def extract_messages(soup):
     return messages
 
 
-# -------------------- دریافت فایل رسانه --------------------
+# ==================== DOWNLOAD MEDIA ====================
 
 def download_media(item):
     url = item["url"]
 
     try:
-        response = session.get(
+        with session.get(
             url,
             timeout=40,
             stream=True,
-        )
-        response.raise_for_status()
+        ) as response:
+            response.raise_for_status()
 
-        content_type = response.headers.get(
-            "Content-Type", ""
-        ).split(";")[0].strip().lower()
+            content_type = response.headers.get(
+                "Content-Type", ""
+            ).split(";")[0].strip().lower()
 
-        chunks = []
-        total = 0
+            chunks = []
+            total = 0
 
-        for chunk in response.iter_content(chunk_size=64 * 1024):
-            if not chunk:
-                continue
+            for chunk in response.iter_content(64 * 1024):
+                if not chunk:
+                    continue
 
-            total += len(chunk)
+                total += len(chunk)
 
-            if total > MAX_MEDIA_SIZE:
-                logging.warning("Media too large; skipped: %s", url)
-                response.close()
+                if total > MAX_MEDIA_SIZE:
+                    logging.warning("Media exceeds size limit: %s", url)
+                    return None
+
+                chunks.append(chunk)
+
+            content = b"".join(chunks)
+
+            if not content:
+                logging.warning("Empty media response: %s", url)
                 return None
 
-            chunks.append(chunk)
-
-        content = b"".join(chunks)
-
-        if not content:
-            return None
-
-        path = urlparse(response.url).path
-        filename = unquote(path.rsplit("/", 1)[-1]) or "media"
+            path = urlparse(response.url).path
+            filename = unquote(path.rsplit("/", 1)[-1]) or "media"
 
         if "." not in filename:
-            extension = mimetypes.guess_extension(
-                content_type or ""
-            )
+            extension = mimetypes.guess_extension(content_type)
             if extension:
                 filename += extension
 
@@ -323,13 +339,16 @@ def download_media(item):
         }
 
     except requests.RequestException as exc:
-        logging.warning("Media download failed: %s", exc)
+        logging.warning("Could not download media: %s", exc)
         return None
 
 
-# -------------------- ارسال به تلگرام --------------------
+# ==================== TELEGRAM API ====================
 
 def telegram_request(method, data=None, files=None):
+    if not BOT_TOKEN:
+        raise RuntimeError("Secret TELEGRAM_BOT_TOKEN is missing.")
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
 
     response = requests.post(
@@ -346,16 +365,17 @@ def telegram_request(method, data=None, files=None):
 
     if not response.ok or not result.get("ok"):
         description = result.get("description", response.text[:500])
-        raise RuntimeError(
-            f"Telegram {method} failed: {description}"
-        )
+        raise RuntimeError(f"Telegram {method}: {description}")
 
     return result
 
 
 def send_text(chat_id, text):
-    # تقسیم متن‌های طولانی به قطعات قابل ارسال
-    parts = [text[i:i + 4000] for i in range(0, len(text), 4000)]
+    # Telegram text limit is 4096 characters.
+    parts = [
+        text[i:i + 4000]
+        for i in range(0, len(text), 4000)
+    ]
 
     for part in parts:
         telegram_request(
@@ -368,31 +388,22 @@ def send_text(chat_id, text):
         )
 
 
-def send_one_media(chat_id, media, caption=""):
-    kind = media["kind"]
-
-    method_by_kind = {
-        "photo": "sendPhoto",
-        "video": "sendVideo",
-        "audio": "sendAudio",
-        "document": "sendDocument",
+def send_media(chat_id, media, caption=""):
+    methods = {
+        "photo": ("sendPhoto", "photo"),
+        "video": ("sendVideo", "video"),
+        "audio": ("sendAudio", "audio"),
+        "document": ("sendDocument", "document"),
     }
 
-    method = method_by_kind.get(kind, "sendDocument")
-
-    field_by_method = {
-        "sendPhoto": "photo",
-        "sendVideo": "video",
-        "sendAudio": "audio",
-        "sendDocument": "document",
-    }
-
-    field = field_by_method[method]
+    method, field = methods.get(
+        media["kind"],
+        ("sendDocument", "document"),
+    )
 
     data = {"chat_id": chat_id}
 
     if caption:
-        # محدودیت کپشن تلگرام
         data["caption"] = caption[:1000]
 
     files = {
@@ -419,118 +430,147 @@ def deliver_message(chat_id, message):
 
     for item in media_items:
         media = download_media(item)
+
         if media:
             downloaded.append(media)
         else:
             logging.warning(
-                "A media item could not be downloaded for message %s",
+                "Media unavailable for message %s",
                 message["id"],
             )
 
+    # If the media is inaccessible, at least preserve the text.
     if not downloaded:
+        if text:
+            send_text(chat_id, text)
+            logging.warning(
+                "Sent text only; media could not be downloaded "
+                "for message %s",
+                message["id"],
+            )
+            return
+
         raise RuntimeError(
-            f"No media could be downloaded for message {message['id']}"
+            f"Could not download any media for message {message['id']}"
         )
 
-    # کپشن را روی رسانه اول قرار می‌دهیم.
     caption = text[:1000] if text else ""
-    send_one_media(chat_id, downloaded[0], caption)
+    send_media(chat_id, downloaded[0], caption)
 
-    # اگر متن از حد مجاز کپشن بلندتر باشد، باقی آن هم ارسال می‌شود.
     if len(text) > 1000:
         send_text(chat_id, text[1000:])
 
-    # رسانه‌های اضافی همان پیام
+    # Send remaining attachments individually.
     for media in downloaded[1:]:
-        send_one_media(chat_id, media)
+        send_media(chat_id, media)
 
 
-# -------------------- اجرای اصلی --------------------
+# ==================== MAIN ====================
 
 def main():
     if not BOT_TOKEN:
-        raise RuntimeError(
-            "Secret TELEGRAM_BOT_TOKEN تنظیم نشده است."
-        )
+        raise RuntimeError("Secret TELEGRAM_BOT_TOKEN is missing.")
 
     if not CHAT_IDS:
-        raise RuntimeError(
-            "Secret TELEGRAM_CHAT_IDS تنظیم نشده است."
-        )
+        raise RuntimeError("Secret TELEGRAM_CHAT_IDS is missing.")
 
     soup = get_page()
     messages = extract_messages(soup)
 
     if not messages:
         raise RuntimeError(
-            "هیچ پیام قابل استفاده‌ای پیدا نشد. "
-            "لاگ Parsed و ساختار HTML را بررسی کنید."
+            "No messages found. Check the Eitaa HTML and logs."
         )
 
     state = load_state()
-    known_ids = state.get("messages", {})
+    stored = state.get("messages", {})
 
-    if not isinstance(known_ids, dict):
-        known_ids = {}
+    if not isinstance(stored, dict):
+        stored = {}
 
-    # اجرای اول: پیام‌های موجود را فقط ثبت می‌کنیم تا
-    # همه پیام‌های قدیمی ناخواسته یک‌باره ارسال نشوند.
+    state["messages"] = stored
+
+    # FIRST RUN: save the current posts as baseline.
+    # They will NOT be forwarded.
     if not state.get("initialized"):
         for message in messages:
-            known_ids[message["id"]] = {
+            stored[message["id"]] = {
                 "fingerprint": message["fingerprint"],
-                "sent_to": [],
+                "sent_to": CHAT_IDS.copy(),
             }
 
-        save_state({
-            "initialized": True,
-            "messages": known_ids,
-        })
+        state["initialized"] = True
+        state["version"] = STATE_VERSION
+        save_state(state)
 
         logging.info(
-            "First run: recorded %d existing messages. "
-            "New messages will be forwarded on later runs.",
+            "Baseline saved: %d existing posts will not be sent. "
+            "Only posts first appearing in a later run are forwarded.",
             len(messages),
         )
         return
 
+    # Migrate the previous version's state without resending old posts.
+    if state.get("version") != STATE_VERSION:
+        for message_id, entry in list(stored.items()):
+            if not isinstance(entry, dict):
+                entry = {}
+
+            entry["sent_to"] = CHAT_IDS.copy()
+            stored[message_id] = entry
+
+        state["version"] = STATE_VERSION
+        state["messages"] = stored
+        save_state(state)
+
+        logging.info(
+            "Migrated old state. Previously known posts will not be sent."
+        )
+
     errors = 0
+    new_count = 0
 
     for message in messages:
         message_id = message["id"]
-        entry = known_ids.get(message_id, {})
+        fingerprint = message["fingerprint"]
 
-        if not isinstance(entry, dict):
-            entry = {}
+        # Existing message IDs are never forwarded again, even if edited.
+        if message_id in stored:
+            entry = stored[message_id]
 
-        if entry.get("fingerprint") != message["fingerprint"]:
-            entry = {
-                "fingerprint": message["fingerprint"],
-                "sent_to": [],
-            }
+            if not isinstance(entry, dict):
+                entry = {}
 
-        sent_to = entry.get("sent_to", [])
-        if not isinstance(sent_to, list):
-            sent_to = []
+            if entry.get("fingerprint") != fingerprint:
+                entry["fingerprint"] = fingerprint
+                entry["sent_to"] = CHAT_IDS.copy()
+                stored[message_id] = entry
+                save_state(state)
+
+            continue
+
+        # An unseen ID means a post not present in our stored history.
+        new_count += 1
+        entry = {
+            "fingerprint": fingerprint,
+            "sent_to": [],
+        }
+        stored[message_id] = entry
+        save_state(state)
 
         for chat_id in CHAT_IDS:
-            if chat_id in sent_to:
+            if chat_id in entry["sent_to"]:
                 continue
 
             try:
                 deliver_message(chat_id, message)
-                sent_to.append(chat_id)
-                entry["sent_to"] = sent_to
-                known_ids[message_id] = entry
 
-                # ذخیره پس از هر مقصد، برای کاهش احتمال تکرار
-                save_state({
-                    "initialized": True,
-                    "messages": known_ids,
-                })
+                entry["sent_to"].append(chat_id)
+                stored[message_id] = entry
+                save_state(state)
 
                 logging.info(
-                    "Forwarded message %s to destination %s",
+                    "Forwarded new message %s to destination %s",
                     message_id,
                     chat_id,
                 )
@@ -538,26 +578,22 @@ def main():
             except Exception as exc:
                 errors += 1
                 logging.exception(
-                    "Failed forwarding message %s to destination %s: %s",
+                    "Failed message %s to destination %s: %s",
                     message_id,
                     chat_id,
                     exc,
                 )
 
-        known_ids[message_id] = entry
+    save_state(state)
 
-    save_state({
-        "initialized": True,
-        "messages": known_ids,
-    })
+    logging.info("New message IDs found: %d", new_count)
 
     if errors:
         raise RuntimeError(
-            f"{errors} forwarding operation(s) failed. "
-            "Check the logs above."
+            f"{errors} delivery operation(s) failed. See logs above."
         )
 
-    logging.info("Forwarding run completed successfully.")
+    logging.info("Run completed successfully.")
 
 
 if __name__ == "__main__":
