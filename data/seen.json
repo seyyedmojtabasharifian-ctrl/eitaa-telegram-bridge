@@ -2,28 +2,28 @@
   "initialized": true,
   "messages": {
     "666": {
-      "fingerprint": "f9cfa810563430539cf9c8d0ba9f4fbd7a106171aacea2d2decccdb5f8a0587c",
+      "fingerprint": "fda9ed426102185b65899c568df8afc63eaa6e04fc0dc72cc0da4b483747e2f3",
       "sent_to": [
         "5044403587",
         "-1004297005952"
       ]
     },
     "665": {
-      "fingerprint": "f81dee0098b01866e632d4a7a0ca7aae8023f8dee5e42a2d24446de8d537b427",
+      "fingerprint": "4a41e9e5f69416d2cbab1a9ec4b41b3fe758a18d2506458187dcc53974496159",
       "sent_to": [
         "5044403587",
         "-1004297005952"
       ]
     },
     "664": {
-      "fingerprint": "cb74c17885bb1278829c605a1aa7efe5489df47587d30fa69700d8fef7fd43b4",
+      "fingerprint": "2f4f90c00f9912ed4c63a41de70faa168400e69427cbcd0760e73178c9f66af2",
       "sent_to": [
         "5044403587",
         "-1004297005952"
       ]
     },
     "659": {
-      "fingerprint": "4debd396b44a82b1c6c10ae8383147be95d0748e918ef9abfe66dea416b1f8cf",
+      "fingerprint": "04eaed9ad185e0021dd6c10f393f3a3717b2603947dfd91fc43e769506552ab1",
       "sent_to": [
         "5044403587",
         "-1004297005952"
@@ -58,35 +58,49 @@
       ]
     },
     "667": {
-      "fingerprint": "a4580c50aa6eb9c164288f53f608dae0141ce85f0f900368d1070ad7e9d1c7b7",
+      "fingerprint": "b90985228aab56b65f91706c712a39d649253366254d0b90b952bec1849cf9fd",
       "sent_to": [
         "5044403587",
         "-1004297005952"
       ]
     },
     "668": {
-      "fingerprint": "e2e8f368523889cb57cc486c48ea1a143255b73cf5bd80d0e2919f804f047fc8",
+      "fingerprint": "80b8bf9d74c24d06d3c10cd7b1038ebfa1baaba7a5811050962bc4dcd7433103",
       "sent_to": [
         "5044403587",
         "-1004297005952"
       ]
     },
     "669": {
-      "fingerprint": "48640bcff47df872af4efa9e17970db1b5e646695657b2bc603295a39ad56636",
+      "fingerprint": "330f9a16e2ce9fd32c37e02897b3a9338be928ab5bd9a6b463fd456b18a9c4f0",
       "sent_to": [
         "5044403587",
         "-1004297005952"
       ]
     },
     "670": {
-      "fingerprint": "2d563615d2ac6985437341b84b34c761407f9ed17f36a5edac2e945f02cb1546",
+      "fingerprint": "9c4f01dfe6d7f5a7a70d091b82ab120d76efc6e60804236481f08e01ae78dc4b",
       "sent_to": [
         "5044403587",
         "-1004297005952"
       ]
     },
     "671": {
-      "fingerprint": "d00a720782311aaf4a42bb621140ddc5aca119e75264950ffc7f3ed3ac5a838f",
+      "fingerprint": "e3bb81c51ba49629d03d3a5e12dcd6e6c23ac265530e204b1cbb1d6bdcfd0e4f",
+      "sent_to": [
+        "5044403587",
+        "-1004297005952"
+      ]
+    },
+    "673": {
+      "fingerprint": "86a6a3c23ed19a6caf95802714186d7f23fafe69de362301c5e3b2d61398af74",
+      "sent_to": [
+        "5044403587",
+        "-1004297005952"
+      ]
+    },
+    "674": {
+      "fingerprint": "3dbb2ca0f74442a24a4a53bc08f6aea2e09b3ea9029848c4ca86a16dbf8e2a67",
       "sent_to": [
         "5044403587",
         "-1004297005952"
